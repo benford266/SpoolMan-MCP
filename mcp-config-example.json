@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "spoolman": {
+      "command": "node",
+      "args": ["/Users/ben/Code/Spoolman-MCP/dist/index.js"],
+      "env": {
+        "SPOOLMAN_URL": "http://192.168.5.6:7912"
+      }
+    }
+  }
+}

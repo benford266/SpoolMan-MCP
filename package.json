@@ -1,0 +1,29 @@
+{
+  "name": "spoolman-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Spoolman 3D printer filament inventory management",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "spoolman",
+    "3d-printing",
+    "filament",
+    "inventory"
+  ],
+  "author": "Ben",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "axios": "^1.7.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
