@@ -44,7 +44,7 @@ This MCP server allows LLM applications (like Claude Desktop, LM Studio, or othe
 
 1. Clone or navigate to this directory:
 ```bash
-cd /Users/ben/Code/Spoolman-MCP
+cd //Code/Spoolman-MCP
 ```
 
 2. Install dependencies:
