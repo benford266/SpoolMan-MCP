@@ -12,283 +12,291 @@ import axios, { AxiosInstance } from "axios";
 const SPOOLMAN_URL = process.env.SPOOLMAN_URL || "http://localhost:7912";
 const API_BASE = `${SPOOLMAN_URL}/api/v1`;
 
-// Create axios instance with base configuration
 const api: AxiosInstance = axios.create({
   baseURL: API_BASE,
   timeout: 10000,
-  headers: {
-    "Content-Type": "application/json",
-  },
+  headers: { "Content-Type": "application/json" },
 });
 
-// Tool definitions
+// --- Response formatters ---
+// Return short readable text instead of raw JSON.
+// Small models (e.g. 4B params) loop when they receive large JSON blobs
+// because they can't parse them and keep calling tools trying to "understand".
+
+function formatSpool(s: any): string {
+  const name = s.filament?.name || "Unknown filament";
+  const vendor = s.filament?.vendor?.name || "Unknown vendor";
+  const material = s.filament?.material || "Unknown";
+  const remaining =
+    s.remaining_weight != null ? Math.round(s.remaining_weight) : null;
+  const total = s.filament?.weight ?? s.initial_weight ?? null;
+  let weightStr = "Unknown weight";
+  if (remaining != null && total != null && total > 0) {
+    const pct = Math.round((remaining / total) * 100);
+    weightStr = `${remaining}g / ${total}g (${pct}%)`;
+  } else if (remaining != null) {
+    weightStr = `${remaining}g remaining`;
+  }
+  const loc = s.location || "No location";
+  const archived = s.archived ? " [ARCHIVED]" : "";
+  return `Spool #${s.id}: ${name} by ${vendor} | ${material} | ${weightStr} | Location: ${loc}${archived}`;
+}
+
+function formatSpoolDetail(s: any): string {
+  const lines: string[] = [];
+  const name = s.filament?.name || "Unknown filament";
+  const vendor = s.filament?.vendor?.name || "Unknown vendor";
+  lines.push(`Spool #${s.id}: ${name} by ${vendor}`);
+
+  if (s.filament?.material) lines.push(`  Material: ${s.filament.material}`);
+
+  const remaining =
+    s.remaining_weight != null ? Math.round(s.remaining_weight) : null;
+  const total = s.filament?.weight ?? s.initial_weight ?? null;
+  if (remaining != null && total != null && total > 0) {
+    const pct = Math.round((remaining / total) * 100);
+    lines.push(`  Remaining: ${remaining}g / ${total}g (${pct}%)`);
+  } else if (remaining != null) {
+    lines.push(`  Remaining: ${remaining}g`);
+  }
+
+  if (s.used_weight != null)
+    lines.push(`  Used: ${Math.round(s.used_weight)}g`);
+  if (s.location) lines.push(`  Location: ${s.location}`);
+  if (s.filament?.color_hex)
+    lines.push(`  Color: #${s.filament.color_hex}`);
+  if (s.filament?.price != null)
+    lines.push(`  Price: $${s.filament.price}`);
+  if (s.filament?.settings_extruder_temp)
+    lines.push(`  Extruder temp: ${s.filament.settings_extruder_temp}°C`);
+  if (s.filament?.settings_bed_temp)
+    lines.push(`  Bed temp: ${s.filament.settings_bed_temp}°C`);
+  lines.push(`  Status: ${s.archived ? "Archived" : "Active"}`);
+  if (s.first_used) lines.push(`  First used: ${s.first_used}`);
+  if (s.last_used) lines.push(`  Last used: ${s.last_used}`);
+  if (s.comment) lines.push(`  Comment: ${s.comment}`);
+
+  return lines.join("\n");
+}
+
+function formatFilament(f: any): string {
+  const vendor = f.vendor?.name || "No vendor";
+  const price = f.price != null ? `$${f.price}` : "No price";
+  const color = f.color_hex ? ` color:#${f.color_hex}` : "";
+  return `#${f.id}: ${f.name || "Unnamed"} by ${vendor} | ${f.material || "Unknown"}${color} | ${price}`;
+}
+
+function formatVendor(v: any): string {
+  let line = `#${v.id}: ${v.name}`;
+  if (v.comment) line += ` (${v.comment})`;
+  return line;
+}
+
+function textResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
+function errorResult(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+// --- Tool definitions ---
+// Reduced from 24 to 10 tools. Small models get confused by too many tools
+// and loop between them. Each tool has a short, clear description.
+
 const TOOLS = [
-  // Vendor tools
-  {
-    name: "list_vendors",
-    description: "List all filament vendors with optional filtering by name",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Filter by vendor name (partial match)" },
-        limit: { type: "number", description: "Maximum number of results (default: 50)" },
-        offset: { type: "number", description: "Number of results to skip" },
-      },
-    },
-  },
-  {
-    name: "get_vendor",
-    description: "Get details of a specific vendor by ID",
-    inputSchema: {
-      type: "object",
-      properties: {
-        vendor_id: { type: "number", description: "Vendor ID" },
-      },
-      required: ["vendor_id"],
-    },
-  },
-  {
-    name: "add_vendor",
-    description: "Add a new filament vendor",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Vendor name" },
-        comment: { type: "string", description: "Optional comment" },
-        empty_spool_weight: { type: "number", description: "Empty spool weight in grams" },
-        external_id: { type: "string", description: "External identifier" },
-      },
-      required: ["name"],
-    },
-  },
-
-  // Filament tools
-  {
-    name: "list_filaments",
-    description: "List filament TYPES/PRODUCTS (not physical inventory). Use this to see available product SKUs, colors, and specifications. For actual stock/inventory, use list_spools instead.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Filter by filament name (partial match)" },
-        vendor_name: { type: "string", description: "Filter by vendor name" },
-        material: { type: "string", description: "Filter by material type (e.g., PLA, ABS, PETG)" },
-        limit: { type: "number", description: "Maximum number of results (default: 50)" },
-        offset: { type: "number", description: "Number of results to skip" },
-      },
-    },
-  },
-  {
-    name: "get_filament",
-    description: "Get details of a specific filament by ID",
-    inputSchema: {
-      type: "object",
-      properties: {
-        filament_id: { type: "number", description: "Filament ID" },
-      },
-      required: ["filament_id"],
-    },
-  },
-  {
-    name: "add_filament",
-    description: "Add a new filament type",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Filament name" },
-        vendor_id: { type: "number", description: "Vendor ID" },
-        material: { type: "string", description: "Material type (e.g., PLA, ABS, PETG)" },
-        price: { type: "number", description: "Price per unit" },
-        density: { type: "number", description: "Density in g/cm³ (e.g., 1.24 for PLA)" },
-        diameter: { type: "number", description: "Diameter in mm (typically 1.75 or 2.85)" },
-        weight: { type: "number", description: "Full spool net weight in grams (e.g., 1000)" },
-        spool_weight: { type: "number", description: "Empty spool weight in grams" },
-        color_hex: { type: "string", description: "Color in hex format (e.g., FF5733)" },
-        settings_extruder_temp: { type: "number", description: "Extruder temperature in Celsius" },
-        settings_bed_temp: { type: "number", description: "Bed temperature in Celsius" },
-        comment: { type: "string", description: "Optional comment" },
-      },
-      required: ["name", "material"],
-    },
-  },
-
-  // Spool tools
   {
     name: "list_spools",
-    description: "List PHYSICAL SPOOLS in inventory (actual stock). Use this to check what's available, how many rolls you have, and remaining filament. Each spool represents one physical roll/unit in stock.",
+    description:
+      "List physical filament spools in inventory. Shows what you have and how much filament is left.",
     inputSchema: {
       type: "object",
       properties: {
-        filament_name: { type: "string", description: "Filter by filament name" },
-        filament_id: { type: "number", description: "Filter by filament ID" },
-        vendor_name: { type: "string", description: "Filter by vendor name" },
-        location: { type: "string", description: "Filter by storage location" },
-        material: { type: "string", description: "Filter by material type" },
-        archived: { type: "boolean", description: "Filter by archived status (true/false)" },
-        limit: { type: "number", description: "Maximum number of results (default: 50)" },
-        offset: { type: "number", description: "Number of results to skip" },
+        material: {
+          type: "string",
+          description: "Filter by material (PLA, ABS, PETG, etc.)",
+        },
+        vendor_name: {
+          type: "string",
+          description: "Filter by vendor name",
+        },
+        location: {
+          type: "string",
+          description: "Filter by storage location",
+        },
+        limit: {
+          type: "number",
+          description: "Max results. Default 10.",
+        },
       },
     },
   },
   {
     name: "get_spool",
-    description: "Get details of a specific spool by ID, including remaining weight and length",
+    description: "Get full details of one spool by its ID number.",
     inputSchema: {
       type: "object",
       properties: {
-        spool_id: { type: "number", description: "Spool ID" },
+        spool_id: {
+          type: "number",
+          description: "The spool ID number",
+        },
       },
       required: ["spool_id"],
     },
   },
   {
     name: "add_spool",
-    description: "Add a new spool to inventory",
+    description:
+      "Add a new physical spool to inventory. Requires the filament type ID.",
     inputSchema: {
       type: "object",
       properties: {
-        filament_id: { type: "number", description: "Filament ID" },
-        price: { type: "number", description: "Purchase price" },
-        initial_weight: { type: "number", description: "Initial filament weight in grams" },
-        spool_weight: { type: "number", description: "Empty spool weight in grams" },
+        filament_id: {
+          type: "number",
+          description: "Filament type ID (use list_filaments to find it)",
+        },
         location: { type: "string", description: "Storage location" },
-        lot_nr: { type: "string", description: "Lot number" },
-        comment: { type: "string", description: "Optional comment" },
+        price: { type: "number", description: "Purchase price" },
+        comment: { type: "string", description: "Optional note" },
       },
       required: ["filament_id"],
     },
   },
   {
     name: "update_spool",
-    description: "Update spool information (location, comment, archived status, etc.)",
+    description: "Update a spool's location, comment, or archive it.",
     inputSchema: {
       type: "object",
       properties: {
-        spool_id: { type: "number", description: "Spool ID" },
-        location: { type: "string", description: "New storage location" },
-        comment: { type: "string", description: "Updated comment" },
-        archived: { type: "boolean", description: "Archive status" },
+        spool_id: {
+          type: "number",
+          description: "The spool ID to update",
+        },
+        location: { type: "string", description: "New location" },
+        comment: { type: "string", description: "New comment" },
+        archived: {
+          type: "boolean",
+          description: "true to archive, false to unarchive",
+        },
       },
       required: ["spool_id"],
     },
   },
   {
-    name: "use_filament",
-    description: "Record filament usage from a spool (by weight or length)",
+    name: "use_spool",
+    description:
+      "Record filament usage from a spool. Specify weight in grams OR length in mm.",
     inputSchema: {
       type: "object",
       properties: {
-        spool_id: { type: "number", description: "Spool ID" },
-        use_weight: { type: "number", description: "Weight used in grams" },
-        use_length: { type: "number", description: "Length used in millimeters" },
+        spool_id: { type: "number", description: "The spool ID" },
+        use_weight: {
+          type: "number",
+          description: "Grams of filament used",
+        },
+        use_length: {
+          type: "number",
+          description: "Millimeters of filament used",
+        },
       },
       required: ["spool_id"],
     },
   },
   {
-    name: "measure_spool",
-    description: "Update spool with a new weight measurement",
+    name: "list_filaments",
+    description:
+      "List filament types/products in the catalog (not physical stock). Shows names, materials, and vendors.",
     inputSchema: {
       type: "object",
       properties: {
-        spool_id: { type: "number", description: "Spool ID" },
-        weight: { type: "number", description: "Measured weight in grams (spool + remaining filament)" },
-      },
-      required: ["spool_id", "weight"],
-    },
-  },
-
-  // Print job tools
-  {
-    name: "list_print_jobs",
-    description: "List all print jobs with optional filtering",
-    inputSchema: {
-      type: "object",
-      properties: {
-        spool_id: { type: "number", description: "Filter by spool ID" },
-        name: { type: "string", description: "Filter by job name" },
-        limit: { type: "number", description: "Maximum number of results (default: 50)" },
-        offset: { type: "number", description: "Number of results to skip" },
+        material: {
+          type: "string",
+          description: "Filter by material (PLA, ABS, PETG, etc.)",
+        },
+        vendor_name: {
+          type: "string",
+          description: "Filter by vendor name",
+        },
+        limit: {
+          type: "number",
+          description: "Max results. Default 10.",
+        },
       },
     },
   },
   {
-    name: "add_print_job",
-    description: "Record a new print job",
+    name: "add_filament",
+    description: "Add a new filament type/product to the catalog.",
     inputSchema: {
       type: "object",
       properties: {
-        spool_id: { type: "number", description: "Spool ID used" },
-        name: { type: "string", description: "Print job name" },
-        weight_used: { type: "number", description: "Filament weight used in grams" },
-        started_at: { type: "string", description: "Start time (ISO 8601 format)" },
-        completed_at: { type: "string", description: "Completion time (ISO 8601 format)" },
-        cost: { type: "number", description: "Calculated cost" },
-        revenue: { type: "number", description: "Revenue generated" },
-        notes: { type: "string", description: "Additional notes" },
-        external_reference: { type: "string", description: "External reference (e.g., gcode filename)" },
+        name: { type: "string", description: "Filament name" },
+        material: {
+          type: "string",
+          description: "Material type (PLA, ABS, PETG, etc.)",
+        },
+        vendor_id: {
+          type: "number",
+          description: "Vendor ID (use list_vendors to find it)",
+        },
+        price: { type: "number", description: "Price" },
+        color_hex: {
+          type: "string",
+          description: "Color hex code (e.g. FF5733)",
+        },
+        weight: {
+          type: "number",
+          description: "Net weight in grams (e.g. 1000)",
+        },
+        diameter: {
+          type: "number",
+          description: "Diameter in mm (1.75 or 2.85)",
+        },
       },
-      required: ["spool_id"],
-    },
-  },
-
-  // Utility tools
-  {
-    name: "list_materials",
-    description: "Get a list of all material types in the database",
-    inputSchema: {
-      type: "object",
-      properties: {},
+      required: ["name", "material"],
     },
   },
   {
-    name: "list_locations",
-    description: "Get a list of all storage locations",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "get_health",
-    description: "Check Spoolman server health status",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "get_info",
-    description: "Get Spoolman system information (version, database type, directories)",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "search_inventory",
-    description: "Search across all inventory items (spools, filaments, vendors) with a general query",
+    name: "list_vendors",
+    description: "List filament vendors/manufacturers.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Search query" },
-        include_archived: { type: "boolean", description: "Include archived spools in results" },
+        name: { type: "string", description: "Filter by vendor name" },
       },
-      required: ["query"],
+    },
+  },
+  {
+    name: "add_vendor",
+    description: "Add a new filament vendor/manufacturer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Vendor name" },
+        comment: {
+          type: "string",
+          description: "Optional note about the vendor",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "server_info",
+    description:
+      "Get Spoolman server status, version, and lists of all materials and storage locations in use.",
+    inputSchema: {
+      type: "object",
+      properties: {},
     },
   },
 ];
 
 // Create MCP server
 const server = new Server(
-  {
-    name: "spoolman-mcp",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
+  { name: "spoolman-mcp", version: "1.0.0" },
+  { capabilities: { tools: {} } }
 );
 
 // Handle tool listing
@@ -302,346 +310,132 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
-      // Vendor operations
-      case "list_vendors": {
-        const params: any = {};
-        if (args?.name) params.name = args.name;
-        if (args?.limit) params.limit = args.limit;
-        if (args?.offset) params.offset = args.offset;
-        const response = await api.get("/vendor", { params });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_vendor": {
-        const response = await api.get(`/vendor/${args?.vendor_id}`);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "add_vendor": {
-        const response = await api.post("/vendor", args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      // Filament operations
-      case "list_filaments": {
-        const params: any = {};
-        if (args?.name) params.name = args.name;
-        if (args?.vendor_name) params["vendor.name"] = args.vendor_name;
-        if (args?.material) params.material = args.material;
-        if (args?.limit) params.limit = args.limit;
-        if (args?.offset) params.offset = args.offset;
-        const response = await api.get("/filament", { params });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_filament": {
-        const response = await api.get(`/filament/${args?.filament_id}`);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "add_filament": {
-        const response = await api.post("/filament", args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      // Spool operations
       case "list_spools": {
-        const params: any = {};
-        if (args?.filament_name) params["filament.name"] = args.filament_name;
-        if (args?.filament_id) params["filament.id"] = args.filament_id;
-        if (args?.vendor_name) params["filament.vendor.name"] = args.vendor_name;
-        if (args?.location) params.location = args.location;
+        const params: Record<string, any> = { limit: args?.limit ?? 10 };
         if (args?.material) params["filament.material"] = args.material;
-        if (args?.archived !== undefined) params.allow_archived = args.archived;
-        if (args?.limit) params.limit = args.limit;
-        if (args?.offset) params.offset = args.offset;
-        const response = await api.get("/spool", { params });
-        const spools = response.data as any[];
-
-        // Add a summary to help LLMs understand the data
-        const summary = {
-          total_spools: spools.length,
-          spools: spools,
-          summary_text: spools.length === 0
-            ? "No spools found matching the criteria"
-            : `Found ${spools.length} spool(s) in inventory`
-        };
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(summary, null, 2),
-            },
-          ],
-        };
+        if (args?.vendor_name)
+          params["filament.vendor.name"] = args.vendor_name;
+        if (args?.location) params.location = args.location;
+        const { data } = await api.get("/spool", { params });
+        const spools = data as any[];
+        if (spools.length === 0) return textResult("No spools found.");
+        const lines = spools.map(formatSpool);
+        return textResult(
+          `Found ${spools.length} spool(s):\n\n${lines.join("\n")}`
+        );
       }
 
       case "get_spool": {
-        const response = await api.get(`/spool/${args?.spool_id}`);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
+        const { data } = await api.get(`/spool/${args?.spool_id}`);
+        return textResult(formatSpoolDetail(data));
       }
 
       case "add_spool": {
-        const response = await api.post("/spool", args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
+        const body: Record<string, any> = { filament_id: args?.filament_id };
+        if (args?.location) body.location = args.location;
+        if (args?.price != null) body.price = args.price;
+        if (args?.comment) body.comment = args.comment;
+        const { data } = await api.post("/spool", body);
+        return textResult(
+          `Spool added successfully.\n\n${formatSpoolDetail(data)}`
+        );
       }
 
       case "update_spool": {
         const { spool_id, ...updateData } = args as any;
-        const response = await api.patch(`/spool/${spool_id}`, updateData);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
+        const { data } = await api.patch(`/spool/${spool_id}`, updateData);
+        return textResult(
+          `Spool #${spool_id} updated.\n\n${formatSpoolDetail(data)}`
+        );
       }
 
-      case "use_filament": {
+      case "use_spool": {
         const { spool_id, ...usageData } = args as any;
-        const response = await api.put(`/spool/${spool_id}/use`, usageData);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
+        const { data } = await api.put(`/spool/${spool_id}/use`, usageData);
+        return textResult(
+          `Usage recorded for spool #${spool_id}.\n\n${formatSpoolDetail(data)}`
+        );
       }
 
-      case "measure_spool": {
-        const { spool_id, weight } = args as any;
-        const response = await api.post(`/spool/${spool_id}/measure`, { weight });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
+      case "list_filaments": {
+        const params: Record<string, any> = { limit: args?.limit ?? 10 };
+        if (args?.material) params.material = args.material;
+        if (args?.vendor_name) params["vendor.name"] = args.vendor_name;
+        const { data } = await api.get("/filament", { params });
+        const filaments = data as any[];
+        if (filaments.length === 0)
+          return textResult("No filament types found.");
+        const lines = filaments.map(formatFilament);
+        return textResult(
+          `Found ${filaments.length} filament type(s):\n\n${lines.join("\n")}`
+        );
       }
 
-      // Print job operations
-      case "list_print_jobs": {
-        const params: any = {};
-        if (args?.spool_id) params.spool_id = args.spool_id;
+      case "add_filament": {
+        const { data } = await api.post("/filament", args);
+        return textResult(`Filament type added: ${formatFilament(data)}`);
+      }
+
+      case "list_vendors": {
+        const params: Record<string, any> = {};
         if (args?.name) params.name = args.name;
-        if (args?.limit) params.limit = args.limit;
-        if (args?.offset) params.offset = args.offset;
-        const response = await api.get("/print-job", { params });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
+        const { data } = await api.get("/vendor", { params });
+        const vendors = data as any[];
+        if (vendors.length === 0) return textResult("No vendors found.");
+        const lines = vendors.map(formatVendor);
+        return textResult(
+          `Found ${vendors.length} vendor(s):\n\n${lines.join("\n")}`
+        );
       }
 
-      case "add_print_job": {
-        const response = await api.post("/print-job", args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
+      case "add_vendor": {
+        const body: Record<string, any> = { name: args?.name };
+        if (args?.comment) body.comment = args.comment;
+        const { data } = await api.post("/vendor", body);
+        return textResult(`Vendor added: ${formatVendor(data)}`);
       }
 
-      // Utility operations
-      case "list_materials": {
-        const response = await api.get("/material");
-        const materials = (response.data as string[]) || [];
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                materials: materials,
-                count: materials.length,
-                message: materials.length > 0
-                  ? `Found ${materials.length} material type(s)`
-                  : "No materials found"
-              }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "list_locations": {
-        const response = await api.get("/location");
-        const locations = (response.data as string[]) || [];
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                locations: locations,
-                count: locations.length,
-                message: locations.length > 0
-                  ? `Found ${locations.length} storage location(s)`
-                  : "No storage locations found"
-              }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_health": {
-        const response = await api.get("/health");
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_info": {
-        const response = await api.get("/info");
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(response.data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "search_inventory": {
-        const query = (args?.query as string) || "";
-        const includeArchived = args?.include_archived ?? false;
-
-        // Search across spools, filaments, and vendors using correct field-specific parameters
-        const [spools, filaments, vendors] = await Promise.all([
-          api.get("/spool", {
-            params: {
-              "filament.name": query,
-              allow_archived: includeArchived,
-            },
-          }).catch(() => ({ data: [] })),
-          api.get("/filament", {
-            params: { name: query },
-          }).catch(() => ({ data: [] })),
-          api.get("/vendor", {
-            params: { name: query },
-          }).catch(() => ({ data: [] })),
+      case "server_info": {
+        const [health, info, materials, locations] = await Promise.all([
+          api
+            .get("/health")
+            .catch(() => ({ data: { status: "unreachable" } })),
+          api.get("/info").catch(() => ({ data: {} as any })),
+          api.get("/material").catch(() => ({ data: [] })),
+          api.get("/location").catch(() => ({ data: [] })),
         ]);
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  query,
-                  results: {
-                    spools: spools.data,
-                    filaments: filaments.data,
-                    vendors: vendors.data,
-                  },
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        const lines: string[] = [];
+        lines.push(
+          `Server: ${health.data.status === "healthy" ? "Healthy" : health.data.status || "Unknown"}`
+        );
+        if (info.data.version) lines.push(`Version: ${info.data.version}`);
+        if (info.data.database_type)
+          lines.push(`Database: ${info.data.database_type}`);
+
+        const mats = (materials.data as string[]) || [];
+        lines.push(
+          `Materials in use: ${mats.length > 0 ? mats.join(", ") : "None"}`
+        );
+
+        const locs = (locations.data as string[]) || [];
+        lines.push(
+          `Storage locations: ${locs.length > 0 ? locs.join(", ") : "None"}`
+        );
+
+        return textResult(lines.join("\n"));
       }
 
       default:
-        throw new Error(`Unknown tool: ${name}`);
+        return errorResult(`Unknown tool: ${name}`);
     }
   } catch (error: any) {
     if (axios.isAxiosError(error)) {
       const status = error.response?.status || "unknown";
       const message = error.response?.data?.message || error.message;
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error calling Spoolman API (${status}): ${message}`,
-          },
-        ],
-        isError: true,
-      };
+      return errorResult(`Spoolman API error (${status}): ${message}`);
     }
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${error.message}`,
-        },
-      ],
-      isError: true,
-    };
+    return errorResult(`Error: ${error.message}`);
   }
 });
 

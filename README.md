@@ -83,7 +83,7 @@ Add this to your Claude Desktop configuration file:
   "mcpServers": {
     "spoolman": {
       "command": "node",
-      "args": ["/Users/ben/Code/Spoolman-MCP/dist/index.js"],
+      "args": ["/Code/Spoolman-MCP/dist/index.js"],
       "env": {
         "SPOOLMAN_URL": "http://localhost:7912"
       }
@@ -101,7 +101,7 @@ In LM Studio, go to the MCP configuration and add:
   "mcpServers": {
     "spoolman": {
       "command": "node",
-      "args": ["/Users/ben/Code/Spoolman-MCP/dist/index.js"],
+      "args": ["/Code/Spoolman-MCP/dist/index.js"],
       "env": {
         "SPOOLMAN_URL": "http://localhost:7912"
       }

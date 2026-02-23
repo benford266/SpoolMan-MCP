@@ -11,6 +11,7 @@ npm-debug.log*
 # Environment
 .env
 .env.local
+.claude
 
 # IDE
 .vscode/
